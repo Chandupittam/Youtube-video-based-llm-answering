@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+sqlalchemy
+psycopg2-binary
+youtube-transcript-api
+google-generativeai
+python-dotenv
