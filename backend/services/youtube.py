@@ -55,7 +55,7 @@ class YouTubeService:
             return None
 
     @staticmethod
-    def download_video(video_id: str) -> str:
+    def download_video(video_id: str, progress_hooks: list = None) -> str:
         """
         Downloads a low-quality version of the video for processing.
         Returns the path to the downloaded file.
@@ -76,12 +76,16 @@ class YouTubeService:
             'no_warnings': True,
         }
         
+        if progress_hooks:
+            ydl_opts['progress_hooks'] = progress_hooks
+            
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             try:
                 info = ydl.extract_info(url, download=True)
                 return ydl.prepare_filename(info)
             except Exception as e:
-                if "This video is not available" in str(e) or "Incomplete YouTube ID" in str(e):
+                error_msg = str(e)
+                if "not available" in error_msg or "Video unavailable" in error_msg or "Incomplete YouTube ID" in error_msg or "deleted" in error_msg.lower():
                     raise ValueError(f"YouTube video '{video_id}' is unavailable or invalid.")
                 raise e
 
@@ -106,7 +110,10 @@ class YouTubeService:
                     'duration': info.get('duration')
                 }
             except Exception as e:
-                print(f"Failed to fetch video info: {str(e)}")
+                error_msg = str(e)
+                print(f"Failed to fetch video info: {error_msg}")
+                if "not available" in error_msg or "Video unavailable" in error_msg or "Incomplete YouTube ID" in error_msg or "deleted" in error_msg.lower():
+                    raise ValueError(f"YouTube video '{video_id}' is unavailable or invalid.")
                 return {}
 
     @staticmethod

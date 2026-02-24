@@ -91,7 +91,7 @@ class LLMService:
         Processes a video file using Gemini 1.5 Flash multimodal capabilities.
         """
         print(f"Uploading file: {video_path}")
-        video_file = self.client.files.upload(path=video_path)
+        video_file = self.client.files.upload(file=video_path)
         
         # Wait for file to be processed
         while video_file.state.name == "PROCESSING":

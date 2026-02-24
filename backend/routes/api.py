@@ -11,10 +11,14 @@ from backend.services.llm import LLMService
 router = APIRouter()
 llm_service = LLMService()
 
+# Global dictionary to track video processing progress
+processing_status: dict[str, str] = {}
+
 @router.post("/process-video")
 async def process_video(request: VideoRequest, db: Session = Depends(get_db)):
+    video_id = YouTubeService.extract_video_id(request.url)
+    processing_status[video_id] = "Initializing analysis..."
     try:
-        video_id = YouTubeService.extract_video_id(request.url)
         
         # Check if video already processed
         video = db.query(Video).filter(Video.video_id == video_id).first()
@@ -24,14 +28,17 @@ async def process_video(request: VideoRequest, db: Session = Depends(get_db)):
                 db.commit()
                 db.refresh(video)
                 
+            processing_status.pop(video_id, None)
             return {
                 "message": "Video already processed", 
                 "video_id": video_id,
+                "title": video.title,
                 "transcript": video.transcript,
                 "summary": video.summary
             }
 
         # 1. Attempt to get transcript
+        processing_status[video_id] = "Fetching video metadata and transcript..."
         transcript = YouTubeService.get_transcript(video_id)
         video_path = None
         
@@ -41,19 +48,37 @@ async def process_video(request: VideoRequest, db: Session = Depends(get_db)):
 
         if not transcript:
             # 2. Fallback to Multimodal (STT or Visual)
+            processing_status[video_id] = "Preparing download..."
             try:
-                video_path = YouTubeService.download_video(video_id)
-                # For summary, we use the video file directly
-                summary = await llm_service.get_summary(None, video_path=video_path)
-                # We can also try to get a "transcript" description from the video
-                transcript = await llm_service.process_multimodal(video_path, "Provide a detailed transcription or description of the video content (speech or visual).")
+                # Pass a callback to update progress with percentage
+                def progress_hook(d):
+                    if d['status'] == 'downloading':
+                        percent = d.get('_percent_str', '0%').strip()
+                        processing_status[video_id] = f"Downloading video... {percent}"
+
+                video_path = YouTubeService.download_video(video_id, progress_hooks=[progress_hook])
+                try:
+                    processing_status[video_id] = "Analyzing video content with AI..."
+                    # For summary, we use the video file directly
+                    summary = await llm_service.get_summary(None, video_path=video_path)
+                    # We can also try to get a "transcript" description from the video
+                    transcript = await llm_service.process_multimodal(video_path, "Provide a detailed transcription or description of the video content (speech or visual).")
+                finally:
+                    # Cleanup video file if it exists, regardless of success/failure
+                    if video_path and os.path.exists(video_path):
+                        print(f"Cleaning up video file: {video_path}")
+                        os.remove(video_path)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
             except Exception as e:
                 print(f"Multimodal processing failed: {str(e)}")
                 raise HTTPException(status_code=500, detail=f"Failed to process video: {str(e)}")
         else:
             # Regular summary from transcript
+            processing_status[video_id] = "Analyzing transcript with AI..."
             summary = await llm_service.get_summary(transcript)
-
+        
+        processing_status[video_id] = "Finalizing results..."
         new_video = Video(
             video_id=video_id,
             title=video_title,
@@ -68,9 +93,11 @@ async def process_video(request: VideoRequest, db: Session = Depends(get_db)):
         if video_path and os.path.exists(video_path):
             os.remove(video_path)
             
+        processing_status.pop(video_id, None)
         return {
             "message": "Video processed successfully", 
             "video_id": video_id,
+            "title": video_title,
             "transcript": transcript,
             "summary": summary
         }
@@ -81,7 +108,19 @@ async def process_video(request: VideoRequest, db: Session = Depends(get_db)):
     except Exception as e:
         import traceback
         traceback.print_exc()
+        processing_status.pop(video_id, None)
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+
+@router.get("/process-status")
+async def get_process_status(url: str):
+    if not url:
+        raise HTTPException(status_code=400, detail="URL is required")
+    try:
+        video_id = YouTubeService.extract_video_id(url)
+        status = processing_status.get(video_id, "Idle")
+        return {"status": status}
+    except Exception as e:
+        return {"status": "Unknown"}
 
 @router.get("/search")
 async def search_videos(q: str, limit: int = 10):
@@ -138,6 +177,30 @@ async def get_profile(db: Session = Depends(get_db)):
     return user
 
 from backend.db.models import Video, QAHistory, User, GeneralChatHistory, ChatSession
+
+@router.delete("/videos/{video_id}")
+async def delete_video(video_id: str, db: Session = Depends(get_db)):
+    video = db.query(Video).filter(Video.video_id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    
+    # Delete associated QA history first
+    db.query(QAHistory).filter(QAHistory.video_id == video.id).delete()
+    db.delete(video)
+    db.commit()
+    return {"message": "Video and history deleted successfully"}
+
+@router.delete("/chat-sessions/{session_id}")
+async def delete_chat_session(session_id: int, db: Session = Depends(get_db)):
+    session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    # Delete associated chat history first
+    db.query(GeneralChatHistory).filter(GeneralChatHistory.session_id == session.id).delete()
+    db.delete(session)
+    db.commit()
+    return {"message": "Chat session and history deleted successfully"}
 
 # ... existing routes ...
 

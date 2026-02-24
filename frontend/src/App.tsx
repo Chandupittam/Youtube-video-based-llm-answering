@@ -1,17 +1,18 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { 
-  Send, MessageSquare, Loader2, Sparkles, 
-  Search, ChevronRight, Layout, 
-  Youtube, Info, History, User as UserIcon, LogOut,
+  Send, MessageSquare, Loader2, 
+  Search, ChevronRight, Layout, Trash2,
+  Youtube, History, User as UserIcon, LogOut,
   Calendar, Mail, BookOpen, Play, Home, X, Bot,
-  ExternalLink, ArrowLeft, Clock
+  ExternalLink, ArrowLeft, Clock, CheckCircle2, AlertCircle
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   processVideo, askQuestion, searchVideos, getHistory, getProfile,
   ProcessVideoResponse, SearchVideo, HistoryVideo, UserProfile, sendGeneralMessage,
-  getChatSessions, getSessionMessages, ChatSession
+  getChatSessions, getSessionMessages, ChatSession,
+  deleteVideo, deleteChatSession, getProcessStatus
 } from './api';
 
 interface ChatMessage {
@@ -29,14 +30,16 @@ interface SearchState {
 
 const App: React.FC = () => {
   const [activeView, setActiveView] = useState<ViewState>('workspace');
-  const [activeTab, setActiveTab] = useState<TabState>('general_chat');
+  const [activeTab, setActiveTab] = useState<TabState>('youtube_analysis');
 
   const [url, setUrl] = useState('');
   const [loading, setLoading] = useState(false);
+  const [processStatus, setProcessStatus] = useState<string>('');
+  const [error, setError] = useState<string | null>(null);
   const [videoData, setVideoData] = useState<ProcessVideoResponse | null>(null);
   const [question, setQuestion] = useState('');
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([
-    { text: "Hello! Ask me anything about the video after it's processed.", type: 'ai' }
+    { text: "Ready for analysis! Please provide a YouTube link to begin.", type: 'ai' }
   ]);
   const [asking, setAsking] = useState(false);
   
@@ -54,7 +57,7 @@ const App: React.FC = () => {
 
   // General Chat state
   const [generalChatHistory, setGeneralChatHistory] = useState<ChatMessage[]>([
-    { text: "Hello! I am Insight AI. How can I help you today?", type: 'ai' }
+    { text: "Hello! I'm Insight AI. How can I assist you with your questions today?", type: 'ai' }
   ]);
   const [generalQuestion, setGeneralQuestion] = useState('');
   const [sendingGeneral, setSendingGeneral] = useState(false);
@@ -64,6 +67,7 @@ const App: React.FC = () => {
     return saved ? parseInt(saved, 10) : null;
   });
   const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
+  const [historySearchQuery, setHistorySearchQuery] = useState('');
 
   useEffect(() => {
     if (currentSessionId) {
@@ -131,19 +135,85 @@ const App: React.FC = () => {
     if (!finalUrl.trim()) return;
     
     setLoading(true);
+    setProcessStatus('Initializing...');
+    setError(null);
     setVideoData(null);
     if (targetUrl) setUrl(targetUrl);
     
+    let pollInterval: any;
     try {
+      // Start polling for progress status
+      pollInterval = setInterval(async () => {
+          try {
+              const res = await getProcessStatus(finalUrl);
+              if (res.status && res.status !== "Idle" && res.status !== "Unknown") {
+                  setProcessStatus(res.status);
+              }
+          } catch (e) {
+              // Ignore polling errors to not interrupt the main flow
+          }
+      }, 1500);
+
       const data = await processVideo(finalUrl);
       setVideoData(data);
       setChatHistory([{ text: "Analysis complete. I'm ready for your questions!", type: 'ai' }]);
+      setActiveTab('youtube_analysis');
       setActiveView('workspace');
-    } catch (error) {
-      console.error(error);
-      alert("Error processing video. Make sure the backend is running.");
+
+      // Dynamically populate Discover Videos sidebar based on the analyzed video
+      if (data.title) {
+          try {
+              // Optionally update the search bar to reflect the current context
+              setSearchQuery(data.title); 
+              setSearching(true);
+              const relatedResults = await searchVideos(data.title, 10);
+              setSearchResults(relatedResults);
+              // Add to history so user can navigate back
+              setSearchHistory(prev => [...prev, { query: data.title, results: relatedResults }]);
+          } catch (searchErr) {
+              console.error("Failed to fetch related videos for sidebar:", searchErr);
+          } finally {
+              setSearching(false);
+          }
+      }
+
+    } catch (err: any) {
+      console.error(err);
+      setError(err.message || "Error processing video. Make sure the backend is running.");
     } finally {
+      if (pollInterval) clearInterval(pollInterval);
       setLoading(false);
+      setProcessStatus('');
+    }
+  };
+
+  const handleDeleteVideo = async (e: React.MouseEvent, videoId: string) => {
+    e.stopPropagation();
+    if (!confirm('Are you sure you want to delete this video from your history?')) return;
+    
+    try {
+      await deleteVideo(videoId);
+      setUserHistory(prev => prev.filter(v => v.video_id !== videoId));
+    } catch (error) {
+      console.error('Error deleting video:', error);
+      alert('Error deleting video from history');
+    }
+  };
+
+  const handleDeleteSession = async (e: React.MouseEvent, sessionId: number) => {
+    e.stopPropagation();
+    if (!confirm('Are you sure you want to delete this chat session?')) return;
+
+    try {
+      await deleteChatSession(sessionId);
+      setChatSessions(prev => prev.filter(s => s.id !== sessionId));
+      if (currentSessionId === sessionId) {
+        setCurrentSessionId(null);
+        setGeneralChatHistory([{ text: "Hello! I'm Insight AI. How can I assist you with your questions today?", type: 'ai' }]);
+      }
+    } catch (error) {
+      console.error('Error deleting session:', error);
+      alert('Error deleting chat session');
     }
   };
 
@@ -281,45 +351,72 @@ const App: React.FC = () => {
                     <div className="flex flex-col items-center justify-center h-full space-y-8">
                         <div className="relative">
                             <div className="w-24 h-24 border-4 border-purple-500/20 border-t-purple-500 rounded-full animate-spin" />
-                            <div className="absolute inset-0 flex items-center justify-center">
-                                <Youtube className="w-8 h-8 text-purple-400 animate-pulse" />
-                            </div>
+                            <div className="absolute inset-0 bg-blue-500/20 blur-xl rounded-full"></div>
+                            <Loader2 className="w-8 h-8 text-blue-400 animate-spin relative z-10" />
                         </div>
-                        <div className="space-y-2 text-center">
-                            <h3 className="outfit text-xl font-bold text-slate-200">Processing Intelligence</h3>
-                            <p className="text-slate-500 text-sm animate-pulse tracking-widest uppercase font-bold">Decoding video signals...</p>
+                        <div>
+                            <h3 className="outfit text-xl font-bold text-slate-200 tracking-tight">Processing Intelligence</h3>
+                            <p className="text-blue-400/80 mt-2 font-medium">{processStatus || "Decoding video signals..."}</p>
                         </div>
                     </div>
-                ) : (
+                ) : videoData ? (
                     <div className="max-w-2xl mx-auto pb-20">
-                        <header className="mb-12 flex items-start justify-between">
+                        <header className="mb-8 flex items-start justify-between border-b border-white/5 pb-6">
                           <div>
-                            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-500/10 border border-blue-500/20 text-[10px] font-bold text-blue-400 mb-4 uppercase tracking-wider">
-                                <Info className="w-3 h-3" /> Processing Complete
-                            </div>
-                            <h3 className="outfit text-3xl font-bold mb-6 text-slate-200">AI Deep Dive Summary</h3>
+                            <h3 className="outfit text-2xl font-bold text-slate-200">Video Analysis Summary</h3>
                           </div>
                           <a 
                             href={`https://www.youtube.com/watch?v=${videoData?.video_id}`}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-red-500/10 border border-red-500/20 text-xs font-bold text-red-500 hover:bg-red-500 hover:text-white transition-all shadow-lg shadow-red-500/10 mt-2"
+                            className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-red-500/10 border border-red-500/20 text-[10px] font-bold text-red-500 hover:bg-red-500 hover:text-white transition-all shadow-lg shadow-red-500/10"
                           >
-                            <ExternalLink className="w-3 h-3" /> Open in YouTube
+                            <ExternalLink className="w-3 h-3" /> YouTube
                           </a>
-                      </header>
+                        </header>
 
                         <div className="prose prose-invert prose-purple max-w-none">
                             <ReactMarkdown 
                                 remarkPlugins={[remarkGfm]}
                                 components={{
-                                    h3: ({node, ...props}) => <h3 className="outfit text-2xl font-bold mt-8 mb-4 text-purple-400" {...props} />,
-                                    p: ({node, ...props}) => <p className="text-slate-300 leading-relaxed mb-4 text-lg font-light" {...props} />,
-                                    li: ({node, ...props}) => <li className="text-slate-300 mb-2 list-disc ml-4" {...props} />,
+                                    h3: ({node, ...props}) => <h3 className="outfit text-xl font-bold mt-6 mb-3 text-purple-400" {...props} />,
+                                    p: ({node, ...props}) => <p className="text-slate-300 leading-relaxed mb-4 text-sm font-light" {...props} />,
+                                    li: ({node, ...props}) => <li className="text-slate-300 mb-2 list-disc ml-4 text-sm" {...props} />,
                                 }}
                             >
                                 {videoData?.summary || ''}
                             </ReactMarkdown>
+                        </div>
+                    </div>
+                ) : error ? (
+                    <div className="flex flex-col items-center justify-center h-full text-center max-w-md mx-auto space-y-6 animate-in zoom-in duration-300">
+                        <div className="w-16 h-16 bg-red-500/10 rounded-2xl flex items-center justify-center border border-red-500/20 shadow-lg shadow-red-500/10">
+                            <AlertCircle className="w-8 h-8 text-red-500" />
+                        </div>
+                        <div>
+                            <h3 className="outfit text-xl font-bold text-slate-200 mb-2">Analysis Failed</h3>
+                            <p className="text-red-400/80 text-sm leading-relaxed font-medium bg-red-500/5 p-4 rounded-xl border border-red-500/10">
+                                {error}
+                            </p>
+                            <button 
+                                onClick={() => { setError(null); setUrl(''); }}
+                                className="mt-6 px-6 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl transition-all border border-white/5 active:scale-95"
+                            >
+                                Try Another Video
+                            </button>
+                        </div>
+                    </div>
+                ) : (
+                    <div className="flex flex-col items-center justify-center h-full text-center max-w-md mx-auto space-y-6">
+                        <div className="w-16 h-16 bg-blue-500/10 rounded-2xl flex items-center justify-center border border-blue-500/20">
+                            <Youtube className="w-8 h-8 text-blue-400" />
+                        </div>
+                        <div>
+                            <h3 className="outfit text-xl font-bold text-slate-200 mb-2">How to use AI Analysis</h3>
+                            <p className="text-slate-400 text-sm leading-relaxed font-light">
+                                To start analyzing, paste a YouTube URL in the search bar above or search for a video in the sidebar. 
+                                Once processed, the summary will appear here and you can ask specific questions in the chat panel.
+                            </p>
                         </div>
                     </div>
                 )}
@@ -327,11 +424,7 @@ const App: React.FC = () => {
         </div>
 
         {/* Right Side: Chat */}
-        <div className="w-[450px] flex flex-col animate-in fade-in slide-in-from-right-4 duration-700">
-        <div className="h-14 border-b border-white/5 flex items-center gap-2 px-6 bg-slate-900/20">
-            <MessageSquare className="w-4 h-4 text-purple-400" />
-            <span className="text-xs font-bold uppercase tracking-widest text-slate-500">Interactive Intelligence</span>
-        </div>
+        <div className="w-[600px] flex flex-col animate-in fade-in slide-in-from-right-4 duration-700 bg-slate-900/10">
         
         <div className="flex-1 overflow-y-auto p-6 flex flex-col gap-6 custom-scrollbar bg-slate-950/20">
             {chatHistory.map((msg, i) => (
@@ -340,7 +433,7 @@ const App: React.FC = () => {
                 className={`flex ${msg.type === 'user' ? 'justify-end' : 'justify-start'}`}
             >
                 <div 
-              className={`max-w-[85%] p-5 rounded-[24px] text-sm leading-relaxed shadow-sm transition-all hover:scale-[1.01] ${
+              className={`max-w-[85%] p-3.5 rounded-[20px] text-sm leading-relaxed shadow-sm transition-all hover:scale-[1.01] ${
                   msg.type === 'user' 
                   ? 'bg-blue-600 text-white rounded-tr-none' 
                   : 'bg-slate-900/80 border border-white/5 text-slate-300 rounded-tl-none'
@@ -357,11 +450,11 @@ const App: React.FC = () => {
             <div ref={chatEndRef} />
         </div>
 
-        <div className="p-6 bg-slate-900/40 border-t border-white/5">
+        <div className="p-4 bg-slate-900/40 border-t border-white/5">
             <div className="relative">
             <input 
                 type="text" 
-                className="w-full bg-slate-950 border border-white/10 rounded-2xl pl-5 pr-14 py-4 text-sm focus:outline-none focus:border-purple-600 transition-all placeholder:text-slate-700 shadow-inner"
+                className="w-full bg-slate-950 border border-white/10 rounded-xl pl-5 pr-14 py-2.5 text-sm focus:outline-none focus:border-purple-600 transition-all placeholder:text-slate-700 shadow-inner"
                 placeholder="Consult the AI about this video..."
                 value={question}
                 onChange={(e) => setQuestion(e.target.value)}
@@ -400,28 +493,41 @@ const App: React.FC = () => {
             </div>
         </div>
 
-        {/* History Tabs */}
-        <div className="flex gap-4 mb-8 pb-4 border-b border-white/10">
-            <button
-                onClick={() => setHistoryTab('chats')}
-                className={`flex items-center gap-2 px-6 py-3 rounded-xl font-medium transition-all ${
-                    historyTab === 'chats' 
-                    ? 'bg-purple-500/20 text-purple-400 border border-purple-500/30 shadow-lg shadow-purple-500/10' 
-                    : 'bg-white/5 text-slate-400 border border-transparent hover:bg-white/10 hover:text-slate-200'
-                }`}
-            >
-                <MessageSquare className="w-4 h-4" /> Chats
-            </button>
-            <button
-                onClick={() => setHistoryTab('videos')}
-                className={`flex items-center gap-2 px-6 py-3 rounded-xl font-medium transition-all ${
-                    historyTab === 'videos' 
-                    ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30 shadow-lg shadow-blue-500/10' 
-                    : 'bg-white/5 text-slate-400 border border-transparent hover:bg-white/10 hover:text-slate-200'
-                }`}
-            >
-                <Youtube className="w-4 h-4" /> Analyzed Videos
-            </button>
+        {/* History Tabs & Search bar */}
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 mb-8 pb-6 border-b border-white/10">
+            <div className="flex gap-4">
+                <button
+                    onClick={() => setHistoryTab('chats')}
+                    className={`flex items-center gap-2 px-6 py-3 rounded-xl font-medium transition-all ${
+                        historyTab === 'chats' 
+                        ? 'bg-purple-500/20 text-purple-400 border border-purple-500/30' 
+                        : 'bg-white/5 text-slate-400 border border-transparent hover:bg-white/10'
+                    }`}
+                >
+                    <MessageSquare className="w-4 h-4" /> Chats
+                </button>
+                <button
+                    onClick={() => setHistoryTab('videos')}
+                    className={`flex items-center gap-2 px-6 py-3 rounded-xl font-medium transition-all ${
+                        historyTab === 'videos' 
+                        ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30' 
+                        : 'bg-white/5 text-slate-400 border border-transparent hover:bg-white/10'
+                    }`}
+                >
+                    <Youtube className="w-4 h-4" /> Videos
+                </button>
+            </div>
+            
+            <div className="relative flex-1 max-w-md">
+                <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                <input 
+                    type="text"
+                    placeholder={`Search ${historyTab === 'chats' ? 'chats' : 'videos'}...`}
+                    className="w-full bg-slate-900/50 border border-white/5 rounded-xl pl-11 pr-4 py-2.5 text-sm focus:outline-none focus:border-purple-500/50 transition-all placeholder:text-slate-600"
+                    value={historySearchQuery}
+                    onChange={(e) => setHistorySearchQuery(e.target.value)}
+                />
+            </div>
         </div>
 
         {loadingHistory ? (
@@ -431,9 +537,11 @@ const App: React.FC = () => {
                 ))}
             </div>
         ) : historyTab === 'videos' ? (
-            userHistory.length > 0 ? (
+            userHistory.filter(v => v.title.toLowerCase().includes(historySearchQuery.toLowerCase()) || v.video_id.toLowerCase().includes(historySearchQuery.toLowerCase())).length > 0 ? (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                    {userHistory.map(item => (
+                    {userHistory
+                        .filter(v => v.title.toLowerCase().includes(historySearchQuery.toLowerCase()) || v.video_id.toLowerCase().includes(historySearchQuery.toLowerCase()))
+                        .map(item => (
                         <div 
                             key={item.video_id} 
                             className="group glass-panel rounded-3xl overflow-hidden hover:border-purple-500/30 transition-all flex flex-col cursor-pointer"
@@ -451,7 +559,16 @@ const App: React.FC = () => {
                                 </p>
                             </div>
                             <div className="px-6 py-4 bg-white/5 border-t border-white/5 flex items-center justify-between">
-                                <span className="text-[10px] font-bold text-blue-400">ANALYZED</span>
+                                <div className="flex items-center gap-4">
+                                    <span className="text-[10px] font-bold text-blue-400">ANALYZED</span>
+                                    <button 
+                                        onClick={(e) => handleDeleteVideo(e, item.video_id)}
+                                        className="p-1.5 rounded-lg hover:bg-red-500/10 text-slate-500 hover:text-red-500 transition-all"
+                                        title="Delete History"
+                                    >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                </div>
                                 <Play className="w-3 h-3 text-slate-400 group-hover:text-purple-400 transition-colors" />
                             </div>
                         </div>
@@ -460,13 +577,17 @@ const App: React.FC = () => {
             ) : (
                 <div className="flex flex-col items-center justify-center py-40 bg-slate-900/20 rounded-3xl border border-dashed border-white/10">
                     <History className="w-16 h-16 text-slate-800 mb-6" />
-                    <p className="text-slate-500">Your video history is empty. Try analyzing a video first!</p>
+                    <p className="text-slate-500">
+                        {historySearchQuery ? "No matching videos found." : "Your video history is empty. Try analyzing a video first!"}
+                    </p>
                 </div>
             )
         ) : (
-            chatSessions.length > 0 ? (
+            chatSessions.filter(s => s.title.toLowerCase().includes(historySearchQuery.toLowerCase())).length > 0 ? (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                    {chatSessions.map(session => (
+                    {chatSessions
+                        .filter(s => s.title.toLowerCase().includes(historySearchQuery.toLowerCase()))
+                        .map(session => (
                         <div 
                             key={session.id} 
                             className="group glass-panel rounded-3xl overflow-hidden hover:border-blue-500/40 transition-all flex flex-col cursor-pointer bg-slate-900/40"
@@ -484,7 +605,16 @@ const App: React.FC = () => {
                                 </div>
                             </div>
                             <div className="px-6 py-4 bg-white/5 border-t border-white/5 flex items-center justify-between">
-                                <span className="text-[10px] font-bold text-purple-400">CHAT SESSION</span>
+                                <div className="flex items-center gap-4">
+                                    <span className="text-[10px] font-bold text-purple-400">CHAT SESSION</span>
+                                    <button 
+                                        onClick={(e) => handleDeleteSession(e, session.id)}
+                                        className="p-1.5 rounded-lg hover:bg-red-500/10 text-slate-500 hover:text-red-500 transition-all"
+                                        title="Delete Session"
+                                    >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                </div>
                                 <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-blue-400 transition-all group-hover:translate-x-1" />
                             </div>
                         </div>
@@ -493,7 +623,9 @@ const App: React.FC = () => {
             ) : (
                 <div className="flex flex-col items-center justify-center py-40 bg-slate-900/20 rounded-3xl border border-dashed border-white/10">
                     <MessageSquare className="w-16 h-16 text-slate-800 mb-6" />
-                    <p className="text-slate-500">No chat history found. Start a new conversation!</p>
+                    <p className="text-slate-500">
+                        {historySearchQuery ? "No matching chats found." : "No chat history found. Start a new conversation!"}
+                    </p>
                 </div>
             )
         )}
@@ -640,7 +772,32 @@ const App: React.FC = () => {
           </h1>
         </div>
 
-        <div className="flex-1 max-w-2xl mx-12">
+        <div className="flex items-center bg-slate-900/40 backdrop-blur-md rounded-full p-1 shadow-lg border border-white/5">
+            <button
+                onClick={() => setActiveTab('general_chat')}
+                className={`flex items-center py-1.5 px-4 rounded-full text-xs font-semibold transition-all ${
+                    activeTab === 'general_chat'
+                    ? "bg-emerald-500/20 text-emerald-400 shadow-[0_0_15px_rgba(16,185,129,0.15)]"
+                    : "text-slate-400 hover:text-white"
+                }`}
+            >
+                <MessageSquare className="w-3.5 h-3.5 mr-2" />
+                Chat
+            </button>
+            <button
+                onClick={() => setActiveTab('youtube_analysis')}
+                className={`flex items-center py-1.5 px-4 rounded-full text-xs font-semibold transition-all ${
+                    activeTab === 'youtube_analysis'
+                    ? "bg-blue-500/20 text-blue-400 shadow-[0_0_15px_rgba(59,130,246,0.15)]"
+                    : "text-slate-400 hover:text-white"
+                }`}
+            >
+                <Youtube className="w-3.5 h-3.5 mr-2" />
+                Analysis
+            </button>
+        </div>
+
+        <div className="flex-1 max-w-xl mx-8">
             <div className="relative group">
             <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
               <Search className="h-4 w-4 text-slate-500 group-focus-within:text-purple-400 transition-colors" />
@@ -654,7 +811,7 @@ const App: React.FC = () => {
                 setSearchQuery(e.target.value);
                 setUrl(e.target.value);
               }}
-              onKeyPress={(e) => e.key === 'Enter' && (searchQuery.includes('http') ? (handleProcess(), setActiveView('workspace')) : handleSearch())}
+              onKeyPress={(e) => e.key === 'Enter' && (searchQuery.includes('http') ? (handleProcess(), setActiveView('workspace'), setActiveTab('youtube_analysis')) : handleSearch())}
             />
           </div>
         </div>
@@ -769,45 +926,16 @@ const App: React.FC = () => {
             
             {/* Top Navigation Toggle */}
             {activeView === 'workspace' && (
-                <div className="w-full max-w-lg mx-auto mt-6 px-4 z-30">
-                    <div className="bg-[#1a1c29]/80 backdrop-blur-md rounded-full p-1 flex justify-center w-full shadow-lg border border-slate-700/50">
-                        <button
-                            onClick={() => setActiveTab('general_chat')}
-                            className={`flex-1 py-2 px-4 rounded-full text-sm font-medium transition-all ${
-                                activeTab === 'general_chat'
-                                ? "bg-emerald-500/20 text-emerald-400 shadow-[0_0_15px_rgba(16,185,129,0.15)]"
-                                : "text-slate-400 hover:text-white hover:bg-white/5"
-                            }`}
-                        >
-                            <MessageSquare className="w-4 h-4 inline-block mr-2" />
-                            Insight AI Chat
-                        </button>
-                        <button
-                            onClick={() => setActiveTab('youtube_analysis')}
-                            className={`flex-1 py-2 px-4 rounded-full text-sm font-medium transition-all ${
-                                activeTab === 'youtube_analysis'
-                                ? "bg-blue-500/20 text-blue-400 shadow-[0_0_15px_rgba(59,130,246,0.15)]"
-                                : "text-slate-400 hover:text-white hover:bg-white/5"
-                            }`}
-                        >
-                            <Youtube className="w-4 h-4 inline-block mr-2" />
-                            YouTube Analysis
-                        </button>
-                    </div>
-                </div>
+                <div />
             )}
 
             {activeView === 'history' ? renderHistory() : 
              activeView === 'profile' ? renderProfile() : 
              activeTab === 'youtube_analysis' ? renderWorkspace() :
              (
-                <div className="flex-1 flex flex-col h-full px-6 py-6 pb-24 relative overflow-hidden">
+                <div className="flex-1 flex flex-col h-full relative overflow-hidden">
                     {/* General Chat Header Area with Model Selection */}
-                    <div className="flex items-center justify-between mx-auto max-w-4xl w-full mb-8 z-20 sticky top-0 bg-[#020617]/80 backdrop-blur pb-4 border-b border-white/5 pt-4">
-                        <div className="flex items-center gap-3">
-                            <Sparkles className="w-6 h-6 text-purple-500" />
-                            <h2 className="outfit text-2xl font-bold tracking-tight">Insight <span className="text-purple-500">Chat</span></h2>
-                        </div>
+                    <div className="flex items-center justify-end w-full px-8 py-4 mb-4 z-20 sticky top-0 bg-[#020617]/80 backdrop-blur border-b border-white/5">
                         <div className="flex items-center gap-4">
                             <button 
                                 onClick={handleNewChat}
@@ -832,26 +960,7 @@ const App: React.FC = () => {
                     </div>
 
                     {/* Chat Messages */}
-                    <div className="flex-1 overflow-y-auto custom-scrollbar space-y-6 max-w-4xl mx-auto w-full px-4 relative z-10 pb-4">
-                        
-                        {generalChatHistory.length === 1 && (
-                            <div className="flex flex-col items-center justify-center text-center space-y-6 animate-fade-in mt-12 mb-8">
-                                <div className="relative">
-                                    <div className="absolute inset-0 bg-blue-500/20 blur-[50px] rounded-full" />
-                                    <div className="bg-gradient-to-br from-[#1a1c29] to-[#0f111a] p-6 rounded-3xl border border-slate-700/50 shadow-2xl relative z-10 flex items-center justify-center">
-                                        <Sparkles className="w-12 h-12 text-blue-400" />
-                                    </div>
-                                </div>
-                                <div>
-                                    <h2 className="text-3xl font-bold text-white mb-4 tracking-tight">
-                                        Welcome to <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-emerald-400">Insight AI</span>
-                                    </h2>
-                                    <p className="text-slate-400 max-w-md mx-auto text-lg leading-relaxed">
-                                        This app is purely for learning from the basics of anything from YouTube videos and asking the LLM model and talking to it.
-                                    </p>
-                                </div>
-                            </div>
-                        )}
+                    <div className="flex-1 overflow-y-auto custom-scrollbar space-y-6 w-full px-8 relative z-10 pb-32">
 
                         {generalChatHistory.map((msg, idx) => (
                             <div key={idx} className={`flex ${msg.type === 'user' ? 'justify-end' : 'justify-start'} animate-in fade-in slide-in-from-bottom-2 duration-500`}>
@@ -863,7 +972,7 @@ const App: React.FC = () => {
                                     }`}>
                                         {msg.type === 'user' ? <UserIcon className="w-5 h-5 text-white" /> : <Bot className="w-5 h-5 text-white" />}
                                     </div>
-                                    <div className={`p-5 rounded-[22px] shadow-2xl transition-all hover:shadow-white/5 ${
+                                    <div className={`p-3.5 rounded-[18px] shadow-2xl transition-all hover:shadow-white/5 ${
                                         msg.type === 'user' 
                                         ? 'bg-gradient-to-br from-blue-600/20 to-indigo-600/10 border border-blue-500/30 text-blue-50 rounded-tr-none' 
                                         : 'bg-slate-900/40 border border-white/10 text-slate-200 rounded-tl-none backdrop-blur-md'
@@ -888,10 +997,10 @@ const App: React.FC = () => {
                     </div>
 
                     {/* Input Area */}
-                    <div className="absolute py-6 bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-slate-950 via-slate-950 to-transparent z-20">
-                        <div className="max-w-4xl mx-auto relative group">
-                            <div className="absolute -inset-1 bg-gradient-to-r from-purple-600 to-blue-600 rounded-[24px] blur opacity-25 group-focus-within:opacity-50 transition duration-1000 group-focus-within:duration-200"></div>
-                            <div className="relative flex items-end gap-2 bg-slate-900 border border-slate-700 p-2 pl-6 rounded-[20px] shadow-2xl">
+                    <div className="absolute py-4 bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-slate-950 via-slate-950 to-transparent z-20">
+                        <div className="w-full relative group">
+                            <div className="absolute -inset-1 bg-gradient-to-r from-purple-600 to-blue-600 rounded-[20px] blur opacity-25 group-focus-within:opacity-50 transition duration-1000 group-focus-within:duration-200"></div>
+                            <div className="relative flex items-end gap-2 bg-slate-900 border border-slate-700 p-1.5 pl-6 rounded-[18px] shadow-2xl">
                                 <textarea
                                     className="flex-1 bg-transparent border-none border-0 focus:border-0 text-sm focus:ring-0 focus:outline-none outline-none resize-none py-3 placeholder:text-slate-500 text-slate-200 leading-relaxed custom-scrollbar h-auto max-h-32"
                                     style={{ border: 'none', outline: 'none', boxShadow: 'none' }}

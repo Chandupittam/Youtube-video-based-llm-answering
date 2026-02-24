@@ -20,9 +20,27 @@ export const processVideo = async (url: string): Promise<ProcessVideoResponse> =
     });
 
     if (!response.ok) {
-        throw new Error("Processing failed");
+        let errorData;
+        try {
+            errorData = await response.json();
+        } catch (e) {
+            throw new Error("Processing failed: " + response.statusText);
+        }
+        throw new Error(errorData.detail || "Processing failed");
     }
 
+    return response.json();
+};
+
+export interface ProcessStatusResponse {
+    status: string;
+}
+
+export const getProcessStatus = async (url: string): Promise<ProcessStatusResponse> => {
+    const response = await fetch(`${API_BASE}/process-status?url=${encodeURIComponent(url)}`);
+    if (!response.ok) {
+        throw new Error("Failed to fetch status");
+    }
     return response.json();
 };
 
@@ -144,4 +162,17 @@ export const getGeneralChatHistory = async (): Promise<GeneralChatHistoryItem[]>
         throw new Error("Failed to fetch general chat history");
     }
     return response.json();
+};
+export const deleteVideo = async (videoId: string): Promise<void> => {
+    const response = await fetch(`${API_BASE}/videos/${videoId}`, {
+        method: 'DELETE'
+    });
+    if (!response.ok) throw new Error("Failed to delete video");
+};
+
+export const deleteChatSession = async (sessionId: number): Promise<void> => {
+    const response = await fetch(`${API_BASE}/chat-sessions/${sessionId}`, {
+        method: 'DELETE'
+    });
+    if (!response.ok) throw new Error("Failed to delete chat session");
 };
